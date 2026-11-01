@@ -36,6 +36,13 @@ app.get("/events", async (req, res) => {
   res.send(AllEvents);
 });
 
+app.post("/events", async  (req, res) => {
+  const newEvent = req.body;
+  const result = await eventsCollection.insertOne(newEvent);
+  res.send(result);
+  console.log("New Event:", newEvent);
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
