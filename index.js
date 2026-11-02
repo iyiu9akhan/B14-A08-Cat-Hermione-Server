@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -27,21 +28,31 @@ const connectedClient = await ConnectToMongoDB();
 const db = connectedClient.db("b14-a08-cat-hermione");
 const eventsCollection = db.collection("events");
 
-const verifyAuth = (req, res, next) => {
-  console.log("I'm middleware");
+const jwks = createRemoteJWKSet(
+  new URL(
+    `${process.env.FRONTEND_JWKS_URL || "http://localhost:3000"}/api/auth/jwks`,
+  ),
+);
 
+const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
+  const token = authHeader?.split(" ")[1];
+  console.log("Token from frontend:", req.method, req.url, token);
 
-  if (authHeader !== "user loggedin") {
-    console.log("Middleware: Unauthorized request blocked");
+  if (!token) {
     return res.status(401).send({ message: "Unauthorized" });
   }
 
-  console.log("Middleware: Authorized, passing to route");
-  next();
+  try {
+    const { payload } = await jwtVerify(token, jwks);
+    console.log("Verified user:", payload);
+    next();
+  } catch (error) {
+    console.log("Token verification failed:", error.message);
+    return res.status(401).send({ message: "Invalid token" });
+  }
 };
 
-// All events (public, login lagbe na)
 app.get("/events", async (req, res) => {
   try {
     const allEvents = await eventsCollection.find({}).toArray();
@@ -51,9 +62,7 @@ app.get("/events", async (req, res) => {
   }
 });
 
-// Manage events: shudhu oi user er nijer create kora event (protected)
-// Eta "/events/:id" er AGE thakte hobe
-app.get("/events/manage/:email", verifyAuth, async (req, res) => {
+app.get("/events/manage/:email", verifyToken, async (req, res) => {
   try {
     const email = req.params.email;
 
@@ -67,8 +76,7 @@ app.get("/events/manage/:email", verifyAuth, async (req, res) => {
   }
 });
 
-// Single event (protected)
-app.get("/events/:id", verifyAuth, async (req, res) => {
+app.get("/events/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
 
@@ -89,7 +97,7 @@ app.get("/events/:id", verifyAuth, async (req, res) => {
 });
 
 // Create event (protected)
-app.post("/events", verifyAuth, async (req, res) => {
+app.post("/events", verifyToken, async (req, res) => {
   try {
     const newEvent = req.body;
     const result = await eventsCollection.insertOne(newEvent);
@@ -104,16 +112,8 @@ app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
 
-
-
-
-
-
-
-
-
-// update event 
-app.patch("/events/:id", verifyAuth, async (req, res) => {
+// update event
+app.patch("/events/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
     const userEmail = req.headers["x-user-email"];
@@ -145,8 +145,8 @@ app.patch("/events/:id", verifyAuth, async (req, res) => {
   }
 });
 
-// delete event 
-app.delete("/events/:id", verifyAuth, async (req, res) => {
+// delete event
+app.delete("/events/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
     const userEmail = req.headers["x-user-email"];
