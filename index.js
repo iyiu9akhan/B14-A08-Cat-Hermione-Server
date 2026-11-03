@@ -22,6 +22,7 @@ const client = new MongoClient(
 let db;
 let eventsCollection;
 let participantsCollection;
+let usersCollection;
 
 // Dynamic Lazy Connection for Serverless Environments
 async function connectDB() {
@@ -30,6 +31,7 @@ async function connectDB() {
     db = client.db("b14-a08-cat-hermione");
     eventsCollection = db.collection("events");
     participantsCollection = db.collection("participants");
+    usersCollection = db.collection("user");
 
     // one user can join one event only once
     await participantsCollection.createIndex(
@@ -227,12 +229,46 @@ app.post("/events/:id/join", verifyToken, async (req, res) => {
         .send({ message: "Owner cannot join their own event" });
     }
 
-    // upsert: joining twice never creates a duplicate
-    await participantsCollection.updateOne(
-      { eventId: id, email: req.user.email },
-      { $setOnInsert: { eventId: id, email: req.user.email, joinedAt: new Date() } },
-      { upsert: true },
-    );
+    const maxParticipants = event.maxParticipants ?? 3;
+
+    // Check if already joined
+    const alreadyJoined = await participantsCollection.findOne({
+      eventId: id,
+      email: req.user.email,
+    });
+
+    if (alreadyJoined) {
+      const participantsCount = await participantsCollection.countDocuments({
+        eventId: id,
+      });
+      return res.send({ success: true, joined: true, participantsCount });
+    }
+
+    // Atomic check: only insert if current count < maxParticipants
+    const currentCount = await participantsCollection.countDocuments({
+      eventId: id,
+    });
+
+    if (currentCount >= maxParticipants) {
+      return res.status(409).send({ message: "This event is already full" });
+    }
+
+    try {
+      await participantsCollection.insertOne({
+        eventId: id,
+        email: req.user.email,
+        joinedAt: new Date(),
+      });
+    } catch (dupError) {
+      // Duplicate key – already joined (race condition)
+      if (dupError.code === 11000) {
+        const participantsCount = await participantsCollection.countDocuments({
+          eventId: id,
+        });
+        return res.send({ success: true, joined: true, participantsCount });
+      }
+      throw dupError;
+    }
 
     const participantsCount = await participantsCollection.countDocuments({
       eventId: id,
@@ -316,8 +352,21 @@ app.get("/events/joined/:email", verifyToken, async (req, res) => {
 app.post("/events", verifyToken, async (req, res) => {
   try {
     await connectDB();
+
+    const ALLOWED_MAX_PARTICIPANTS = [3, 10, 25];
+    const rawMax = req.body.maxParticipants;
+    const maxParticipants = Number(rawMax);
+
+    if (!ALLOWED_MAX_PARTICIPANTS.includes(maxParticipants)) {
+      return res.status(400).send({
+        message: "maxParticipants must be 3, 10, or 25.",
+      });
+    }
+
+    const { maxParticipants: _ignored, ...rest } = req.body;
     const newEvent = {
-      ...req.body,
+      ...rest,
+      maxParticipants,
       organizerEmail: req.user.email,
     };
 
@@ -402,6 +451,51 @@ app.delete("/events/:id", verifyToken, async (req, res) => {
 
     res.send(result);
   } catch (error) {
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+// Update user profile - Protected
+app.patch("/users/profile", verifyToken, async (req, res) => {
+  try {
+    await connectDB();
+
+    const { name, image } = req.body;
+
+    // Server-side validation
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).send({ message: "Name is required." });
+    }
+
+    const imageValue = image;
+    if (
+      !imageValue ||
+      typeof imageValue !== "string" ||
+      !/^https?:\/\/\S+/.test(imageValue.trim())
+    ) {
+      return res
+        .status(400)
+        .send({ message: "Enter a valid image URL (http or https)." });
+    }
+
+    const updatedFields = {
+      name: name.trim(),
+      image: imageValue.trim(),
+    };
+
+    const result = await usersCollection.findOneAndUpdate(
+      { email: req.user.email },
+      { $set: updatedFields },
+      { returnDocument: "after" },
+    );
+
+    if (!result) {
+      return res.status(404).send({ message: "User not found." });
+    }
+
+    res.send({ success: true, user: result });
+  } catch (error) {
+    console.error("Update Profile Error:", error);
     res.status(500).send({ message: "Server error" });
   }
 });
