@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
@@ -9,7 +8,12 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
-app.use(cors());
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  }),
+);
 
 const client = new MongoClient(
   `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.joq5z4d.mongodb.net`,
@@ -27,17 +31,18 @@ export async function ConnectToMongoDB() {
 }
 
 const connectedClient = await ConnectToMongoDB();
+
 const db = connectedClient.db("b14-a08-cat-hermione");
 const eventsCollection = db.collection("events");
 
+// Better Auth JWKS
 const frontendUrl = (
   process.env.FRONTEND_JWKS_URL || "http://localhost:3000"
 ).replace(/\/+$/, "");
 
-const jwks = createRemoteJWKSet(
-  new URL(`${frontendUrl}/api/auth/jwks`),
-);
+const jwks = createRemoteJWKSet(new URL(`${frontendUrl}/api/auth/jwks`));
 
+// Verify JWT
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -58,13 +63,20 @@ const verifyToken = async (req, res, next) => {
   try {
     const { payload } = await jwtVerify(token, jwks);
 
-    if (!payload.sub) {
+    if (
+      !payload.sub ||
+      typeof payload.email !== "string" ||
+      !payload.email.trim()
+    ) {
       return res.status(401).send({
         message: "Invalid token payload.",
       });
     }
 
-    req.user = payload;
+    req.user = {
+      id: payload.sub,
+      email: payload.email.trim().toLowerCase(),
+    };
 
     next();
   } catch (error) {
@@ -76,6 +88,7 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
+// Get all events - Public
 app.get("/events", async (req, res) => {
   try {
     const allEvents = await eventsCollection.find({}).toArray();
@@ -85,12 +98,19 @@ app.get("/events", async (req, res) => {
   }
 });
 
+// Get user's events - Protected
 app.get("/events/manage/:email", verifyToken, async (req, res) => {
   try {
-    const email = req.params.email;
+    const email = req.params.email.trim().toLowerCase();
+
+    if (email !== req.user.email) {
+      return res.status(403).send({
+        message: "Forbidden",
+      });
+    }
 
     const myEvents = await eventsCollection
-      .find({ organizerEmail: email })
+      .find({ organizerEmail: req.user.email })
       .toArray();
 
     res.send(myEvents);
@@ -99,7 +119,8 @@ app.get("/events/manage/:email", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/events/:id", verifyToken, async (req, res) => {
+// Get single event - Public
+app.get("/events/:id", async (req, res) => {
   try {
     const id = req.params.id;
 
@@ -121,9 +142,13 @@ app.get("/events/:id", verifyToken, async (req, res) => {
   }
 });
 
+// Create event - Protected
 app.post("/events", verifyToken, async (req, res) => {
   try {
-    const newEvent = req.body;
+    const newEvent = {
+      ...req.body,
+      organizerEmail: req.user.email,
+    };
 
     const result = await eventsCollection.insertOne(newEvent);
 
@@ -136,10 +161,10 @@ app.post("/events", verifyToken, async (req, res) => {
   }
 });
 
+// manage events
 app.patch("/events/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
-    const userEmail = req.headers["x-user-email"];
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({ message: "Invalid event id" });
@@ -153,14 +178,17 @@ app.patch("/events/:id", verifyToken, async (req, res) => {
       return res.status(404).send({ message: "Event not found" });
     }
 
-    if (!userEmail || event.organizerEmail !== userEmail) {
+    if (event.organizerEmail !== req.user.email) {
       return res.status(403).send({ message: "Forbidden" });
     }
 
     const { title, type, date, location, photoURL, description } = req.body;
 
     const result = await eventsCollection.updateOne(
-      { _id: new ObjectId(id) },
+      {
+        _id: new ObjectId(id),
+        organizerEmail: req.user.email,
+      },
       {
         $set: {
           title,
@@ -179,10 +207,10 @@ app.patch("/events/:id", verifyToken, async (req, res) => {
   }
 });
 
+// Delete events
 app.delete("/events/:id", verifyToken, async (req, res) => {
   try {
     const id = req.params.id;
-    const userEmail = req.headers["x-user-email"];
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({ message: "Invalid event id" });
@@ -196,12 +224,13 @@ app.delete("/events/:id", verifyToken, async (req, res) => {
       return res.status(404).send({ message: "Event not found" });
     }
 
-    if (!userEmail || event.organizerEmail !== userEmail) {
+    if (event.organizerEmail !== req.user.email) {
       return res.status(403).send({ message: "Forbidden" });
     }
 
     const result = await eventsCollection.deleteOne({
       _id: new ObjectId(id),
+      organizerEmail: req.user.email,
     });
 
     res.send(result);
