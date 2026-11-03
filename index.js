@@ -5,7 +5,6 @@ import "dotenv/config";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
 
@@ -15,25 +14,23 @@ app.use(
   }),
 );
 
+// MongoDB Connection Setup
 const client = new MongoClient(
   `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.joq5z4d.mongodb.net`,
 );
 
-export async function ConnectToMongoDB() {
-  try {
+let db;
+let eventsCollection;
+
+// Dynamic Lazy Connection for Serverless Environments
+async function connectDB() {
+  if (!db) {
     await client.connect();
+    db = client.db("b14-a08-cat-hermione");
+    eventsCollection = db.collection("events");
     console.log("Successfully Connected to MongoDB");
-    return client;
-  } catch (err) {
-    console.log(err);
-    throw err;
   }
 }
-
-const connectedClient = await ConnectToMongoDB();
-
-const db = connectedClient.db("b14-a08-cat-hermione");
-const eventsCollection = db.collection("events");
 
 // Better Auth JWKS
 const frontendUrl = (
@@ -42,7 +39,7 @@ const frontendUrl = (
 
 const jwks = createRemoteJWKSet(new URL(`${frontendUrl}/api/auth/jwks`));
 
-// Verify JWT
+// Verify JWT Middleware
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -88,9 +85,15 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
+// Root route for sanity check
+app.get("/", (req, res) => {
+  res.send("Hermione Server is running live!");
+});
+
 // Get all events - Public
 app.get("/events", async (req, res) => {
   try {
+    await connectDB();
     const allEvents = await eventsCollection.find({}).toArray();
     res.send(allEvents);
   } catch (error) {
@@ -101,6 +104,7 @@ app.get("/events", async (req, res) => {
 // Get user's events - Protected
 app.get("/events/manage/:email", verifyToken, async (req, res) => {
   try {
+    await connectDB();
     const email = req.params.email.trim().toLowerCase();
 
     if (email !== req.user.email) {
@@ -122,6 +126,7 @@ app.get("/events/manage/:email", verifyToken, async (req, res) => {
 // Get single event - Public
 app.get("/events/:id", async (req, res) => {
   try {
+    await connectDB();
     const id = req.params.id;
 
     if (!ObjectId.isValid(id)) {
@@ -145,6 +150,7 @@ app.get("/events/:id", async (req, res) => {
 // Create event - Protected
 app.post("/events", verifyToken, async (req, res) => {
   try {
+    await connectDB();
     const newEvent = {
       ...req.body,
       organizerEmail: req.user.email,
@@ -161,9 +167,10 @@ app.post("/events", verifyToken, async (req, res) => {
   }
 });
 
-// manage events
+// Update event - Protected
 app.patch("/events/:id", verifyToken, async (req, res) => {
   try {
+    await connectDB();
     const id = req.params.id;
 
     if (!ObjectId.isValid(id)) {
@@ -207,9 +214,10 @@ app.patch("/events/:id", verifyToken, async (req, res) => {
   }
 });
 
-// Delete events
+// Delete event - Protected
 app.delete("/events/:id", verifyToken, async (req, res) => {
   try {
+    await connectDB();
     const id = req.params.id;
 
     if (!ObjectId.isValid(id)) {
@@ -239,6 +247,13 @@ app.delete("/events/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+// Local Development listen
+if (process.env.NODE_ENV !== "production") {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
+
+// Mandatory export for Vercel Serverless Function
+export default app;
