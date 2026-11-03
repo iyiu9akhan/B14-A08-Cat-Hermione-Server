@@ -21,6 +21,7 @@ const client = new MongoClient(
 
 let db;
 let eventsCollection;
+let participantsCollection;
 
 // Dynamic Lazy Connection for Serverless Environments
 async function connectDB() {
@@ -28,6 +29,14 @@ async function connectDB() {
     await client.connect();
     db = client.db("b14-a08-cat-hermione");
     eventsCollection = db.collection("events");
+    participantsCollection = db.collection("participants");
+
+    // one user can join one event only once
+    await participantsCollection.createIndex(
+      { eventId: 1, email: 1 },
+      { unique: true },
+    );
+
     console.log("Successfully Connected to MongoDB");
   }
 }
@@ -85,6 +94,30 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
+// Helper: { eventId: count } for all events
+async function getCountsMap() {
+  const counts = await participantsCollection
+    .aggregate([{ $group: { _id: "$eventId", count: { $sum: 1 } } }])
+    .toArray();
+
+  const map = {};
+  counts.forEach((item) => {
+    map[item._id] = item.count;
+  });
+  return map;
+}
+
+// Helper: add participantsCount to events and remove old participants field
+function addCounts(events, countsMap) {
+  return events.map((event) => {
+    const { participants, ...rest } = event;
+    return {
+      ...rest,
+      participantsCount: countsMap[event._id.toString()] || 0,
+    };
+  });
+}
+
 // Root route for sanity check
 app.get("/", (req, res) => {
   res.send("Hermione Server is running live!");
@@ -95,7 +128,8 @@ app.get("/events", async (req, res) => {
   try {
     await connectDB();
     const allEvents = await eventsCollection.find({}).toArray();
-    res.send(allEvents);
+    const countsMap = await getCountsMap();
+    res.send(addCounts(allEvents, countsMap));
   } catch (error) {
     res.status(500).send({ message: "Server error" });
   }
@@ -108,16 +142,15 @@ app.get("/events/manage/:email", verifyToken, async (req, res) => {
     const email = req.params.email.trim().toLowerCase();
 
     if (email !== req.user.email) {
-      return res.status(403).send({
-        message: "Forbidden",
-      });
+      return res.status(403).send({ message: "Forbidden" });
     }
 
     const myEvents = await eventsCollection
       .find({ organizerEmail: req.user.email })
       .toArray();
+    const countsMap = await getCountsMap();
 
-    res.send(myEvents);
+    res.send(addCounts(myEvents, countsMap));
   } catch (error) {
     res.status(500).send({ message: "Server error" });
   }
@@ -141,8 +174,140 @@ app.get("/events/:id", async (req, res) => {
       return res.status(404).send({ message: "Event not found" });
     }
 
-    res.send(result);
+    const userEmail = req.headers["x-user-email"]
+      ? String(req.headers["x-user-email"]).trim().toLowerCase()
+      : null;
+
+    const participantsCount = await participantsCollection.countDocuments({
+      eventId: id,
+    });
+
+    let joined = false;
+    if (userEmail) {
+      const found = await participantsCollection.findOne({
+        eventId: id,
+        email: userEmail,
+      });
+      joined = Boolean(found);
+    }
+
+    const { participants, ...rest } = result;
+
+    res.send({
+      ...rest,
+      participantsCount,
+      joined,
+    });
   } catch (error) {
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+// Join event - Protected
+app.post("/events/:id/join", verifyToken, async (req, res) => {
+  try {
+    await connectDB();
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid event id" });
+    }
+
+    const event = await eventsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!event) {
+      return res.status(404).send({ message: "Event not found" });
+    }
+
+    if (event.organizerEmail === req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Owner cannot join their own event" });
+    }
+
+    // upsert: joining twice never creates a duplicate
+    await participantsCollection.updateOne(
+      { eventId: id, email: req.user.email },
+      { $setOnInsert: { eventId: id, email: req.user.email, joinedAt: new Date() } },
+      { upsert: true },
+    );
+
+    const participantsCount = await participantsCollection.countDocuments({
+      eventId: id,
+    });
+
+    res.send({ success: true, joined: true, participantsCount });
+  } catch (error) {
+    console.error("Join Event Error:", error);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+// Leave event - Protected
+app.delete("/events/:id/join", verifyToken, async (req, res) => {
+  try {
+    await connectDB();
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid event id" });
+    }
+
+    const event = await eventsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!event) {
+      return res.status(404).send({ message: "Event not found" });
+    }
+
+    await participantsCollection.deleteOne({
+      eventId: id,
+      email: req.user.email,
+    });
+
+    const participantsCount = await participantsCollection.countDocuments({
+      eventId: id,
+    });
+
+    res.send({ success: true, joined: false, participantsCount });
+  } catch (error) {
+    console.error("Leave Event Error:", error);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+// Get events joined by the user - Protected
+app.get("/events/joined/:email", verifyToken, async (req, res) => {
+  try {
+    await connectDB();
+    const email = req.params.email.trim().toLowerCase();
+
+    if (email !== req.user.email) {
+      return res.status(403).send({ message: "Forbidden" });
+    }
+
+    // find all participant records for this user
+    const records = await participantsCollection
+      .find({ email: req.user.email })
+      .sort({ joinedAt: -1 })
+      .toArray();
+
+    if (records.length === 0) {
+      return res.send([]);
+    }
+
+    const eventIds = records.map((r) => new ObjectId(r.eventId));
+    const events = await eventsCollection
+      .find({ _id: { $in: eventIds } })
+      .toArray();
+
+    const countsMap = await getCountsMap();
+    res.send(addCounts(events, countsMap));
+  } catch (error) {
+    console.error("Joined Events Error:", error);
     res.status(500).send({ message: "Server error" });
   }
 });
@@ -159,8 +324,6 @@ app.post("/events", verifyToken, async (req, res) => {
     const result = await eventsCollection.insertOne(newEvent);
 
     res.send(result);
-
-    console.log("New Event:", newEvent);
   } catch (error) {
     console.error("Create Event Error:", error);
     res.status(500).send({ message: "Server error" });
@@ -197,14 +360,7 @@ app.patch("/events/:id", verifyToken, async (req, res) => {
         organizerEmail: req.user.email,
       },
       {
-        $set: {
-          title,
-          type,
-          date,
-          location,
-          photoURL,
-          description,
-        },
+        $set: { title, type, date, location, photoURL, description },
       },
     );
 
@@ -240,6 +396,9 @@ app.delete("/events/:id", verifyToken, async (req, res) => {
       _id: new ObjectId(id),
       organizerEmail: req.user.email,
     });
+
+    // remove this event's participants too
+    await participantsCollection.deleteMany({ eventId: id });
 
     res.send(result);
   } catch (error) {
