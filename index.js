@@ -10,11 +10,11 @@ app.use(express.json());
 
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: process.env.FRONTEND_URL,
   }),
 );
 
-// MongoDB Connection Setup
+// MongoDB connection setup
 const client = new MongoClient(
   `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.joq5z4d.mongodb.net`,
 );
@@ -24,7 +24,6 @@ let eventsCollection;
 let participantsCollection;
 let usersCollection;
 
-// Dynamic Lazy Connection for Serverless Environments
 async function connectDB() {
   if (!db) {
     await client.connect();
@@ -33,7 +32,6 @@ async function connectDB() {
     participantsCollection = db.collection("participants");
     usersCollection = db.collection("user");
 
-    // one user can join one event only once
     await participantsCollection.createIndex(
       { eventId: 1, email: 1 },
       { unique: true },
@@ -43,14 +41,12 @@ async function connectDB() {
   }
 }
 
-// Better Auth JWKS
-const frontendUrl = (
-  process.env.FRONTEND_JWKS_URL || "http://localhost:3000"
-).replace(/\/+$/, "");
+// better auth jwks
+const frontendUrl = process.env.FRONTEND_JWKS_URL.replace(/\/+$/, "");
 
 const jwks = createRemoteJWKSet(new URL(`${frontendUrl}/api/auth/jwks`));
 
-// Verify JWT Middleware
+// verify jwt middleware
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -96,7 +92,6 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// Helper: { eventId: count } for all events
 async function getCountsMap() {
   const counts = await participantsCollection
     .aggregate([{ $group: { _id: "$eventId", count: { $sum: 1 } } }])
@@ -109,7 +104,6 @@ async function getCountsMap() {
   return map;
 }
 
-// Helper: add participantsCount to events and remove old participants field
 function addCounts(events, countsMap) {
   return events.map((event) => {
     const { participants, ...rest } = event;
@@ -120,12 +114,11 @@ function addCounts(events, countsMap) {
   });
 }
 
-// Root route for sanity check
 app.get("/", (req, res) => {
   res.send("Hermione Server is running live!");
 });
 
-// Get all events - Public
+// get all events - public
 app.get("/events", async (req, res) => {
   try {
     await connectDB();
@@ -137,7 +130,7 @@ app.get("/events", async (req, res) => {
   }
 });
 
-// Get user's events - Protected
+// get user's events - protected
 app.get("/events/manage/:email", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -158,7 +151,7 @@ app.get("/events/manage/:email", verifyToken, async (req, res) => {
   }
 });
 
-// Get single event - Public
+// get single event - public
 app.get("/events/:id", async (req, res) => {
   try {
     await connectDB();
@@ -205,7 +198,7 @@ app.get("/events/:id", async (req, res) => {
   }
 });
 
-// Join event - Protected
+// join event
 app.post("/events/:id/join", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -231,7 +224,7 @@ app.post("/events/:id/join", verifyToken, async (req, res) => {
 
     const maxParticipants = event.maxParticipants ?? 3;
 
-    // Check if already joined
+    // check if already joined
     const alreadyJoined = await participantsCollection.findOne({
       eventId: id,
       email: req.user.email,
@@ -244,7 +237,7 @@ app.post("/events/:id/join", verifyToken, async (req, res) => {
       return res.send({ success: true, joined: true, participantsCount });
     }
 
-    // Atomic check: only insert if current count < maxParticipants
+    // participants count check
     const currentCount = await participantsCollection.countDocuments({
       eventId: id,
     });
@@ -260,7 +253,7 @@ app.post("/events/:id/join", verifyToken, async (req, res) => {
         joinedAt: new Date(),
       });
     } catch (dupError) {
-      // Duplicate key – already joined (race condition)
+      // already joined
       if (dupError.code === 11000) {
         const participantsCount = await participantsCollection.countDocuments({
           eventId: id,
@@ -281,7 +274,7 @@ app.post("/events/:id/join", verifyToken, async (req, res) => {
   }
 });
 
-// Leave event - Protected
+// leave event
 app.delete("/events/:id/join", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -315,7 +308,7 @@ app.delete("/events/:id/join", verifyToken, async (req, res) => {
   }
 });
 
-// Get events joined by the user - Protected
+// get events joined by the user
 app.get("/events/joined/:email", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -325,7 +318,7 @@ app.get("/events/joined/:email", verifyToken, async (req, res) => {
       return res.status(403).send({ message: "Forbidden" });
     }
 
-    // find all participant records for this user
+    //  all participants  for user
     const records = await participantsCollection
       .find({ email: req.user.email })
       .sort({ joinedAt: -1 })
@@ -348,7 +341,7 @@ app.get("/events/joined/:email", verifyToken, async (req, res) => {
   }
 });
 
-// Create event - Protected
+// create event
 app.post("/events", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -379,7 +372,7 @@ app.post("/events", verifyToken, async (req, res) => {
   }
 });
 
-// Update event - Protected
+// update event
 app.patch("/events/:id", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -419,7 +412,7 @@ app.patch("/events/:id", verifyToken, async (req, res) => {
   }
 });
 
-// Delete event - Protected
+// delete event
 app.delete("/events/:id", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -446,7 +439,7 @@ app.delete("/events/:id", verifyToken, async (req, res) => {
       organizerEmail: req.user.email,
     });
 
-    // remove this event's participants too
+    // remove participant
     await participantsCollection.deleteMany({ eventId: id });
 
     res.send(result);
@@ -455,14 +448,13 @@ app.delete("/events/:id", verifyToken, async (req, res) => {
   }
 });
 
-// Update user profile - Protected
+// update user profile
 app.patch("/users/profile", verifyToken, async (req, res) => {
   try {
     await connectDB();
 
     const { name, image } = req.body;
 
-    // Server-side validation
     if (!name || typeof name !== "string" || !name.trim()) {
       return res.status(400).send({ message: "Name is required." });
     }
@@ -500,7 +492,6 @@ app.patch("/users/profile", verifyToken, async (req, res) => {
   }
 });
 
-// Local Development listen
 if (process.env.NODE_ENV !== "production") {
   const PORT = process.env.PORT || 5000;
   app.listen(PORT, () => {
@@ -508,5 +499,5 @@ if (process.env.NODE_ENV !== "production") {
   });
 }
 
-// Mandatory export for Vercel Serverless Function
+//vercel
 export default app;
