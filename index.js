@@ -346,13 +346,17 @@ app.post("/events", verifyToken, async (req, res) => {
   try {
     await connectDB();
 
-    const ALLOWED_MAX_PARTICIPANTS = [3, 10, 25];
-    const rawMax = req.body.maxParticipants;
-    const maxParticipants = Number(rawMax);
+    const MIN_PARTICIPANTS = 1;
+    const MAX_PARTICIPANTS = 30;
+    const maxParticipants = Number(req.body.maxParticipants);
 
-    if (!ALLOWED_MAX_PARTICIPANTS.includes(maxParticipants)) {
+    if (
+      !Number.isInteger(maxParticipants) ||
+      maxParticipants < MIN_PARTICIPANTS ||
+      maxParticipants > MAX_PARTICIPANTS
+    ) {
       return res.status(400).send({
-        message: "maxParticipants must be 3, 10, or 25.",
+        message: `maxParticipants must be a whole number between ${MIN_PARTICIPANTS} and ${MAX_PARTICIPANTS}.`,
       });
     }
 
