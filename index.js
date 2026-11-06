@@ -92,10 +92,20 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-async function getCountsMap() {
-  const counts = await participantsCollection
-    .aggregate([{ $group: { _id: "$eventId", count: { $sum: 1 } } }])
-    .toArray();
+async function getCountsMap(eventIds) {
+  // const counts = await participantsCollection
+  //   .aggregate([{ $group: { _id: "$eventId", count: { $sum: 1 } } }])
+  //   .toArray();
+
+  const pipeline = [];
+
+  if (eventIds) {
+    pipeline.push({ $match: { eventId: { $in: eventIds } } });
+  }
+
+  pipeline.push({ $group: { _id: "$eventId", count: { $sum: 1 } } });
+
+  const counts = await participantsCollection.aggregate(pipeline).toArray();
 
   const map = {};
   counts.forEach((item) => {
@@ -119,18 +129,53 @@ app.get("/", (req, res) => {
 });
 
 // get all events - public
+// app.get("/events", async (req, res) => {
+//   try {
+//     await connectDB();
+//     const allEvents = await eventsCollection.find({}).toArray();
+//     const countsMap = await getCountsMap();
+//     res.send(addCounts(allEvents, countsMap));
+//   } catch (error) {
+//     res.status(500).send({ message: "Server error" });
+//   }
+// });
+
+// get all events - public (optional: ?upcoming=true&limit=6)
 app.get("/events", async (req, res) => {
   try {
     await connectDB();
-    const allEvents = await eventsCollection.find({}).toArray();
-    const countsMap = await getCountsMap();
-    res.send(addCounts(allEvents, countsMap));
+
+    const { upcoming, limit } = req.query;
+    const isUpcoming = upcoming === "true";
+
+    const filter = {};
+    if (isUpcoming) {
+      const today = new Date().toISOString().slice(0, 10);
+      filter.date = { $gte: today };
+    }
+
+    let cursor = eventsCollection.find(filter);
+
+    if (isUpcoming) {
+      cursor = cursor.sort({ date: 1 });
+    }
+
+    const limitNum = parseInt(limit, 10);
+    if (Number.isInteger(limitNum) && limitNum > 0) {
+      cursor = cursor.limit(Math.min(limitNum, 100));
+    }
+
+    const events = await cursor.toArray();
+    const countsMap = await getCountsMap(events.map((e) => e._id.toString()));
+
+    res.send(addCounts(events, countsMap));
   } catch (error) {
+    console.error("Get Events Error:", error);
     res.status(500).send({ message: "Server error" });
   }
 });
 
-// get user's events - protected
+// get user's events 
 app.get("/events/manage/:email", verifyToken, async (req, res) => {
   try {
     await connectDB();
@@ -147,11 +192,12 @@ app.get("/events/manage/:email", verifyToken, async (req, res) => {
 
     res.send(addCounts(myEvents, countsMap));
   } catch (error) {
+    console.error("Get Events Error:", error);
     res.status(500).send({ message: "Server error" });
   }
 });
 
-// get single event - public
+// get single event
 app.get("/events/:id", async (req, res) => {
   try {
     await connectDB();
